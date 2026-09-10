@@ -11,7 +11,7 @@ The goal is simple:
 **Let language models build Minecraft structures in a structured way.**
 
 
-See chat example: [EXAMPLE](https://www.workbuddy.link/p/FIYOuk3cUr9JyL5TBIGS3y?ext2=copy_link)
+See chat example: [EXAMPLE](https://www.workbuddy.link/p/FIYOuk3cUr9JyL5TBIGS3y?ext2=copy_link) (By deepseek v4.1)
 
 ![EXAMPLE-PICTURE](./demo.png)
 
