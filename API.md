@@ -1,11 +1,11 @@
 # mcbuild 模型 API 手册
 
-> **目标读者：LLM。代码量大，非必要不读用不上的源码，这份文档就是全部接口。**
-> 版本 0.2.0 · 2026-09-10 · 92 个方法 / 16 个模块 / 零第三方依赖
+> **目标读者：LLM。代码量较大，非必要不读用不上的源码，这份文档就是全部接口。**
+> 版本 0.3.1 · 2026-09-11 · 22 个模块 / `World` 上 82 个公开方法 / 零第三方依赖
 
 ---
 
-## 1. 十条铁律
+## 1. 十二条铁律
 
 违反这些的代码大概率跑不通或产出废建筑。**先读完这节再动手。**
 
@@ -18,9 +18,15 @@
 | 5 | **大建筑按 `stage` 分步 + `save`/`load`** | 一个阶段一个阶段做，上下文才不会越堆越长 |
 | 6 | **对称结构用 `compare.symmetry` 自查** | 实测它在真实建筑上抓出过 42 处肉眼看不见的错误 |
 | 7 | **`iso()` 必须带 `step`** | 25×25 的平面默认输出近百列 × 60 行，token 直接爆掉 |
-| 8 | **blockstate 属性要么全写、要么全不写** | 一边显式 `hinge="left"` 一边缺省，`compare` 会误报不一致 |
-| 9 | **写完就渲染检查**（`slice`/`view`），不要盲写一大段 | 反馈闭环是这个框架的全部价值 |
-| 10 | **非法 blockstate 会抛异常**，不会静默兜底 | 这是故意的，早暴露早修 |
+| 8 | **写完用 `w.unknown_blocks()` / `registry.check()` 查一遍拼错的方块名** | 逐格写错名不会抛异常，会静默按实心方块处理 |
+| 9 | **写完就渲染检查**；大范围或破坏性操作先 `w.preview(...)` 看报价 | 反馈闭环是这个框架的全部价值；大范围误操作很难精确回滚 |
+| 10 | **重复单元用 `w.material(...)` 加材质差异** | 20 个开间像素级相同 = 一眼假 |
+| 11 | **非法 blockstate 会抛异常**，不会静默兜底 | 这是故意的，早暴露早修 |
+| 12 | **有多个独立单元时用 `w.region(...)` 分区**（建筑群 / 空岛群 / 以后想单独搬动的部件） | 单体建筑别分——分区是为了**操作**，不是为了整齐。判断见 §10.5 |
+
+> ASCII 能验"几何对不对"，验不了"好不好看"。**美术验收用 `w.image` 渲一张 PNG
+> 自己看**（§12.1）：配色、层次、云海形态这类问题只有看图才发现得了。
+> 纯 ASCII 环境下可跳过，不影响构建流程。
 
 ---
 
@@ -30,10 +36,14 @@
 
 | 方法 | 签名 | 说明 |
 |---|---|---|
-| `set` | `set(pos, block, **state) -> Block` | 写一个方块 |
+| `set` | `set(pos, block, nbt=None, **state) -> Block` | 写一个方块（`nbt` 给告示牌文字/箱子内容） |
 | `get` | `get(pos) -> Block` | 读一个方块（空气返回 `AIR`） |
+| `entity` | `entity(pos, id, **nbt) -> dict` | 放置实体（盔甲架 / 画 / 物品展示框） |
 | `fill` | `fill(box, block, **state) -> int` | 填满闭区间盒，返回格数 |
 | `clear` | `clear(box) -> int` | 清空区域 |
+| `paint` | `paint(shape, brush, bx=None) -> int` | **用 Shape 定义几何、Brush 定义材质** |
+| `erase` | `erase(shape, bx=None) -> int` | 按 Shape 挖空 |
+| `repaint` | `repaint(mapping=None, *, family=None) -> int` | **整体换配色** |
 | `replace` | `replace(box, src=None, dst="air") -> int` | 区域内 `src` 换 `dst`；`src=None` 表示空气 |
 | `frame` | `frame(at=(0,0,0), yaw=0) -> Frame` | 建局部坐标系 |
 | `mark` | `mark(name, pos) -> V` | 记点锚点 |
@@ -44,11 +54,20 @@
 | `dirty_box` | `dirty_box() -> Box \| None` | 相对基线（`checkpoint`）的改动范围 |
 | `checkpoint` | `checkpoint()` | 把当前状态设为 diff 基线 |
 | `undo` / `redo` | `-> bool` | 撤销 / 重做一层事务 |
+| `material` | `material(mapping, seed=None)` | 材质混合上下文（位置哈希，确定性） |
+| `preview` | `preview(fn, *args, **kwargs) -> Preview` | 干跑：先看后果再决定提交 |
+| `region` | `region(name)` | 定义命名区域（可 `with`，可累积） |
+| `region_of` | `region_of(name) -> Region` | 取已有区域 |
+| `region_at` | `region_at(pos, solid_only=True) -> Region \| None` | 反查某坐标属于哪个区域（取最深） |
+| `region_table` | `region_table(sort_by="name") -> List[dict]` | 区域一览（含层级与大小） |
+| `unknown_blocks` | `unknown_blocks() -> List[(V, id, msg)]` | 列出拼错的方块 |
 | `lint` | `lint() -> List[Issue]` | 物理校验 |
 | `report` | `report(exec_line="", render_box=None) -> str` | 四段式反馈文本 |
 | `save` / `load` | `save(path)` / `World.load(path)` | JSON 存档 / 读档 |
+| `import_schem` | `import_schem(path, at=None)` | 读 `.schem` 合并进来（当零件用） |
+| `export_tiled` | `export_tiled(dir, chunk=48, prefix)` | **分块导出**（结构方块 48³ 上限） |
 
-属性：`w.query` · `w.render` · `w.compare` · `w.marks` · `w.cells` · `w.instances` · `w.stages` · `w.grids`
+属性：`w.query` · `w.render` · `w.image` · `w.compare` · `w.marks` · `w.cells` · `w.instances` · `w.stages` · `w.grids`
 
 ### 2.2 轴网（`grid.py`，挂在 World 上）
 
@@ -82,7 +101,11 @@
 | `symmetry` | `symmetry(bx=None, axis="x", pivot=None) -> List[Diff]` | 镜像对称校验 |
 | `rotational` | `rotational(bx=None, yaw=90, center=None) -> List[Diff]` | 旋转对称（区域须 x/z 等长） |
 | `regions` | `regions(a, b, yaw=0) -> List[Diff]` | 两区域比对 |
-| `instances` | `instances(name, i=0, j=1) -> List[Diff]` | 两实例局部布局比对 |
+| `instances` | `instances(name, i=0, j=1, orientation_blind=False) -> List[Diff]` | 两实例比对 |
+| `diff` | `diff(after, before=None, mode="exact") -> DiffReport` | **结构化差异**（分类 + 按区域汇总） |
+| `since_checkpoint` | `since_checkpoint(mode="exact") -> DiffReport` | 相对最近 `checkpoint()` 的变化 |
+| `duplicates` | `duplicates(boxes, mode="shape") -> List` | 在一组区域里找重复的 |
+| `fingerprint` | `fingerprint(bx=None, mode="exact")` | 平移不变的指纹 |
 | `report` | `report(diffs, limit=20) -> str` | 格式化差异 |
 | `is_symmetric` | `is_symmetric(bx=None, axis="x") -> bool` | 快捷判断 |
 
@@ -151,18 +174,49 @@
 
 `overlay="facing"` 单独渲染朝向层：`^`=-z(N) `v`=+z(S) `>`=+x(E) `<`=-x(W)
 
-### 2.9 方块（`block.py`）
+### 2.9 图像（`image.py`，挂在 World 上，`w.image`）
+
+| 方法 | 签名 | 说明 |
+|---|---|---|
+| `render` | `render(out, bx=None, tw=8, bh=8, bg=…, horizon=…, sky_gain=0.10) -> str` | 渲成 PNG，返回路径 |
+| `save` | `save(out, bx=None, **kw) -> str` | `render` 的别名 |
+| `color` | `color(name, rgb) -> Image` | 登记/覆盖一个材质颜色（链式） |
+| `colors` | `colors(mapping) -> Image` | 批量登记颜色（链式） |
+| `palette` | `palette: Dict[str, RGB]` | 当前调色板，可直接 `update` |
+| `preview` | `preview(path) -> str` | 尽力调用系统看图器（失败不抛） |
+
+模块级：`DEFAULT_PALETTE` · `DEFAULT_COLOR` · `CLOUD_KINDS` · `canvas` 类 `Canvas`
+
+### 2.10 方块（`block.py`）
 
 `make(block, yaw=0, **state) -> Block` · `classify(id) -> 族名` ·
 `rotate_block(b, yaw)` · `mirror_block(b, axis)` · `is_solid(b) -> bool`
 
 模块级常量：`AIR` · `STAIRS_UPHILL`（楼梯 facing 语义，改它可全局翻转）
 
-### 2.10 导入导出（`io.py`）
+### 2.11 导入导出（`io.py`）
 
-`export_schem(w, path, version=3)` · `export_nbt(w, path)` · `export_json(w, path)` ·
-`import_json(path, world=None)`
-（`import_schem` 未实现）
+`export_schem` · `export_nbt` · `export_json` · `export_tiled` ·
+`import_json` · `import_schem` · `merge`（带冲突报告）·
+`loads_nbt` / `loads_nbt_gz`（NBT 解析）· `parse_block_key`
+
+---
+
+### 2.12 方块注册表（`mcbuild.registry`）
+
+| 函数 | 说明 |
+|---|---|
+| `exists(name) -> bool` | 这个方块存在吗（非 `minecraft:` 命名空间一律放过） |
+| `check(name) -> str \| None` | `None` 表示没问题，否则是带拼写候选的诊断 |
+| `suggest(name, n=5) -> List[str]` | 按编辑距离给候选 |
+| `search(pattern) -> List[str]` | 按子串搜索方块名 |
+| `states(name) -> dict` | 属性定义：属性名 → 合法取值列表 |
+| `defaults(name) -> dict` | 该方块的默认属性 |
+| `label(name) -> str \| None` | 英文显示名 |
+| `info() -> dict` | 数据来源与覆盖范围 |
+
+数据来自 **prismarinejs/minecraft-data**（MIT），覆盖 1.21.x 的 **1196 个方块**，
+随库分发（16 KB gzip），零第三方依赖。
 
 ---
 
@@ -260,6 +314,188 @@ print(w.render.diff())                  # 只画这一格的改动
 w.undo()                                # 撤销
 print(w.count())
 ```
+
+### 材质混合 `w.material(...)`
+
+让重复单元不再一模一样。上下文内的所有写入（`fill` / `wall` / `pillar` / 组件展开……）
+都会按权重把方块换成变体：
+
+```python
+with w.material({"stone_bricks": {"cracked_stone_bricks": 0.12,
+                                  "mossy_stone_bricks": 0.08}}):
+    w.wall(box((0, 64, 0), (31, 71, 31)), "stone_bricks")
+```
+
+三条保证：
+
+| 保证 | 原因 |
+|---|---|
+| **确定性**：同 seed 重跑逐格一致 | 图案由**位置哈希**决定（FNV-1a 纯整数运算），不用 `random`，也不受 `PYTHONHASHSEED` 影响 |
+| **同组件不同实例图案不同** | 哈希输入是世界坐标 —— 20 个开间 place 到不同位置，纹理天然各不相同（这正是消除"复制粘贴感"的关键） |
+| **模板改动不扰动别处** | 每个位置独立决定，不是随机序列，改一个位置不影响其他位置 |
+
+变体与原方块**同族**时继承 state：
+
+```python
+with w.material({"spruce_stairs": {"oak_stairs": 0.3}}):
+    w.stairs_run((0, 64, 0), "north", 6, "spruce_stairs")
+# 变体仍是 oak_stairs[facing=north,half=bottom]，朝向没丢
+```
+
+`seed` 默认取 `World(seed=...)`；显式传参可让同一区域重复出同一图案。
+`undo` 不会重新混合（撤销还原的是原样）。
+
+### 形状与材质：`Shape` / `Brush`
+
+`fill(box, block)` 是"形状 = 长方体、材质 = 常数"的特例。把两者拆开后，
+**同一个形状换一个 brush 就换一种效果** —— 真实感的分界线往往就在"材质随位置变化"。
+
+```python
+from mcbuild import Shape, Brush
+
+# 按高度风化：墙脚长苔 → 中段正常 → 上部干净
+w.paint(Shape.box(box((0, 64, 0), (15, 84, 15))),
+        Brush.by_height([(0.0, 0.25, "mossy_stone_bricks"),
+                         (0.25, 0.70, "stone_bricks"),
+                         (0.70, 1.01, "chiseled_stone_bricks")]))
+
+# 布尔组合 + 按法线换材质
+s = Shape.union(Shape.sphere((8, 80, 8), 10),
+                Shape.box(box((0, 64, 0), (16, 80, 16))))
+w.paint(Shape.subtract(s, Shape.sphere((8, 80, 8), 6)),
+        Brush.by_normal({"up": "smooth_stone", "side": "stone_bricks",
+                         "down": "deepslate"}))
+
+w.erase(Shape.sphere((8, 70, 8), 5))          # 按形状挖空
+```
+
+**Shape 构造器**（几何）
+
+| 构造器 | 说明 |
+|---|---|
+| `Shape.box(bx)` | 长方体 |
+| `Shape.sphere(center, r)` / `Shape.ellipsoid(center, radii)` | 球 / 椭球（带解析法线） |
+| `Shape.cylinder(center, r, height)` | 竖直圆柱（中心在下底圆心） |
+| `Shape.torus(center, major, minor, axis="y")` | 圆环体（`major` 环半径 / `minor` 管半径） |
+| `Shape.expr(pred, bounds)` | 任意谓词 `lambda p: ...` |
+| `Shape.union(a, b, ...)` / `intersect` / `subtract(a, b)` | 布尔运算 |
+| `Shape.hollow(shape, thickness=1)` | 只留外壳 |
+| `Shape.warp(shape, amplitude=2.0, frequency=0.08, seed=0, octaves=1)` | **域变形**：用噪声揉坐标 |
+| `Shape.lattice(bx, spacing, radius)` | 格状小球；配 `subtract` 挖规则孔洞阵列 |
+| `Shape.field(center, radii, seed=0, frequency=0.09, threshold=-0.30)` | **噪声雕塑**：浮石 / 云团 / 岩体 |
+
+后三个是"让几何自然起来"的主力。噪声由**位置哈希**驱动，同 seed 逐格可复现：
+
+```python
+# 规整的球揉一下就像岩石
+w.paint(Shape.warp(Shape.sphere((0, 70, 0), 12), amplitude=2.5,
+                   frequency=0.12, seed=5),
+        Brush.by_normal({"up": "mossy_cobblestone", "side": "cobblestone"}))
+
+# 立方体挖孔洞阵列（格状镂空）
+bb = box((0, 64, 0), (23, 87, 23))
+w.paint(Shape.subtract(Shape.box(bb), Shape.lattice(bb, spacing=8, radius=3.2)),
+        Brush.solid("deepslate_tiles"))
+
+# 云团 / 浮石：椭球内按噪声裁剪，填充率约一半
+w.paint(Shape.field((0, 90, 0), (18, 10, 18), seed=3),
+        Brush.gradient("y", [(0, "light_gray_concrete"), (10, "white_concrete")]))
+```
+
+`field` 的 `threshold` 越大越空（实测可调范围约 6%～85% 填充率），
+`bias` 越大体积越向中心缩。
+
+Shape 还提供 `shape.contains(p)`、`shape.bounds`、`shape.normal(p)`（体素差分估计）、
+`shape.t(p)`（归一化参数，默认按高度：底 0 → 顶 1）。
+
+**Brush 构造器**（材质）
+
+| 构造器 | 说明 |
+|---|---|
+| `Brush.solid(block)` | 常数 |
+| `Brush.by_height([(t0, t1, block), ...])` | 按 Shape 内归一化高度分段 |
+| `Brush.by_normal({"up": ..., "side": ..., "down": ...})` | 按表面法线（可写六个方向或 `side`） |
+| `Brush.by_distance(center, [(r0, r1, block), ...])` | 按到某点的距离 |
+| `Brush.gradient(axis, [(坐标值, block), ...])` | 按**世界坐标**沿轴渐变 |
+| `Brush.noise({block: 权重}, seed=0)` | 按位置哈希混合（确定性） |
+| `Brush.fn(lambda p, shape: ...)` | 自定义，返回方块名或 `None`（跳过） |
+
+`paint` 的遍历范围默认取 `shape.bounds`，可用 `bx=` 覆盖（必须包住所有命中坐标）。
+两个操作都可 `undo`。
+
+### 方块实体与实体
+
+`set` 的 `nbt` 参数给方块实体数据；`entity` 放实体。导出时写进 `.schem` 的
+`BlockEntities` / `Entities`，以及结构方块格式的对应字段。
+
+```python
+# 告示牌文字
+w.set((0, 65, 0), "oak_sign", rotation=8,
+      nbt={"front_text": {"messages": ['{"text":"滕王阁"}']}})
+
+# 箱子内容（Items 用原始 NBT 结构，Slot 从 0 开始）
+w.set((1, 64, 0), "chest",
+      nbt={"Items": [{"Slot": 0, "id": "minecraft:diamond", "Count": 3}]})
+
+# 实体：坐标自动 +0.5 居中（实体位置是浮点）
+w.entity((4, 64, 4), "armor_stand", ShowArms=1)
+w.entity((2, 66, 2), "painting", Facing=2, Motive="Kebab")
+```
+
+`nbt` 接受普通 Python dict（内部递归转 NBT）：`dict → Compound`、
+`list → List`（元素类型必须一致）、`bool → Byte`、`int → Int`、`float → Double`。
+方块被清空时，它上面的方块实体一并移除。
+
+### 换配色 `w.repaint(...)`
+
+迭代速度的瓶颈往往是换配色，不是建模。
+
+```python
+w.repaint(family=("stone", "quartz"))        # 石材整体换成石英
+w.repaint({"stone_bricks": "deepslate_tiles"})   # 只换一种
+w.repaint(lambda b: "gold_block" if b.name.endswith("_bricks") else None)
+```
+
+内置家族（`mcbuild.palette.FAMILIES`）：`stone` `deepslate` `blackstone` `quartz`
+`sandstone` `red_sandstone` `bricks` `prismarine` `copper` `concrete` `wool`
+`terracotta` `oak` `spruce` `birch` `dark_oak`。
+
+家族间映射**先按关键词找同名变体**（`stone_bricks` → `quartz_bricks`、
+`smooth_stone` → `smooth_quartz`），找不到才按色阶索引比例对齐。映射时
+**继承原 blockstate**，所以楼梯换材质后还是楼梯、朝向不丢，`_stairs`/`_slab`/
+`_wall` 后缀也会跟着换。可 `undo`。
+
+### 干跑预览 `w.preview(...)`
+
+**先看后果，再决定要不要提交。** 世界在 preview 期间一行未动：
+
+```python
+pv = w.preview(w.clear, box((0, 64, 0), (63, 100, 63)))
+print(pv.report())
+#   preview clear((0,64,0)..(63,100,63))
+#     将改动 12000 格：新增 0 · 移除 12000 · 替换 0
+#     影响范围 (0,64,0)..(63,100,63)  尺寸 (64,37,64)
+#     涉及组件实例：bay#0 bay#1 bay#2 …共 8 个
+
+if pv.removed > 2000:
+    pv.discard()          # 太大了，换个范围
+else:
+    pv.commit()           # 确认后原子提交
+```
+
+| 成员 | 说明 |
+|---|---|
+| `pv.changed` / `added` / `removed` / `replaced` | 分类统计 |
+| `pv.box` | 影响范围 |
+| `pv.empty` | 空操作（改了等于没改） |
+| `pv.instances_hit()` | 哪些组件实例的范围与改动相交 |
+| `pv.report()` | 格式化的完整报告 |
+| `pv.commit()` / `pv.discard()` | 只能调用一次；都调用过会抛 `RuntimeError` |
+
+`commit` 是**重放**那个操作（不是回灌 patch），所以 `place` 出来的组件实例会正常登记。
+框架是确定性的，重放同一操作得到同一结果。
+
+preview 内如果抛异常，世界和 undo 栈都会回滚干净。
 
 ---
 
@@ -508,8 +744,42 @@ w.compare.instances("bay", 0, 3)         # 8 个开间本应完全一致
 
 `rotational` / `regions` 同量级（0.4–0.6 s），`instances` 更快（只遍历一个实例的格子）。
 
-**已知限制**：blockstate 默认值未归一化 —— 一边显式写 `hinge="left"`、一边缺省，
-会被判为不一致（语义其实相同）。规避：属性要么全写、要么全不写。
+**默认值已归一化**：Minecraft 的 blockstate 有默认值，所以 `oak_door[half=lower]`
+与 `oak_door[half=lower,hinge=left]` 是同一个东西。比较时会先补全默认值再比，
+所以一边显式写、一边缺省**不会**被判为不一致。
+（导出与 `key()` 仍用原始 state —— 补全会让 palette 拖一长串默认属性。）
+
+### 结构化 diff
+
+`w.render.diff()` 画的是图；`w.compare` 给的是**能统计的数据**：
+
+```python
+w.checkpoint()                      # 设基线
+...改动...
+d = w.compare.since_checkpoint()
+print(d.report(world=w))
+#   diff since checkpoint：共 262 处（新增 0 · 移除 5 · 替换 257）
+#     范围 (0,64,0)..(22,70,15)
+#     按区域：nave 256 · tower 6
+#     [cha] (0,64,0) stone_bricks -> deepslate_tiles
+#     ...
+
+d.by_kind()          # {'added': 0, 'removed': 5, 'changed': 257}
+d.by_region(w)       # {'nave': 256, 'tower': 6, '(未分区)': 1}
+d.box()              # 变化范围的包围盒
+d.added / d.removed / d.changed      # 三份 Change 列表
+```
+
+大建筑里"**哪一块被动了**"比"哪几格被动了"有用得多，所以 `by_region` 是重点。
+
+```python
+w.compare.diff(old_world)                        # 旧版 -> 现在
+w.compare.diff(old_world, mode="shape")          # 忽略朝向等属性
+w.compare.duplicates([bx1, bx2, bx3], mode="shape")   # 找重复的建筑
+```
+
+`mode="shape"` 忽略的是**属性**（朝向、half…），不是材质 ——
+换了材质的方块仍算不同。
 
 ---
 
@@ -544,6 +814,158 @@ w = World.load("church.json"); w.stage("nave", build_nave); w.save("church.json"
 ```
 
 > `stage` 的函数引用不会被 `save` 持久化。跨对话后要 `rerun` 需重新 `define` / 重新注册函数。
+
+### 跨对话能保住什么
+
+`w.save()` 除体素外还存**组件实例 / 命名区域 / 阶段**的元数据，所以第 2 轮
+`load` 回来之后，组件同步与分区能力仍然可用：
+
+```python
+w = World.load("church.json")
+len(w.instances), len(w.regions), len(w.stages)   # 都还在
+w.region_of("nave").translate((40, 0, 0))         # ✅ 区域可继续操作
+w.stage_box("nave")                               # ✅ 阶段范围可引用
+
+w.define("bay", bay_v2)      # 模板要重新注册（函数本来就不能序列化）
+w.replay("bay")              # ✅ 重放，且每个实例的局部覆盖逐条继承
+```
+
+| 存了什么 | 没存什么（下轮脚本里会重新注册） |
+|---|---|
+| 实例的 `name / at / yaw / params / overrides / 父子关系` | 模板函数 `_components` |
+| 区域的 `name / cells` | 实例的 patch（重建时不需要） |
+| 阶段的 `name / box` | 阶段的 fn（所以 `rerun` 不可用，`stage_box` 可用） |
+
+两点注意：
+
+- **`params` 里不能放函数之类的不可序列化值** —— 那条实例会被跳过（其余照常），
+  避免一条坏数据毁掉整个存档
+- 恢复出来的实例没有 patch，`replay` 直接按 `at/yaw/params` 重建，**不会**先撤销
+  （位置由参数决定，重建即覆盖）
+
+`meta=False` 可关掉这些元数据（只存体素，文件更小）。
+
+> **`stage` 切的是时间。** 如果建筑里有多个**独立单元**（建筑群、空岛群、
+> 以后想单独搬动的部件），还需要按**空间**切分 —— 见下一节。
+
+---
+
+## 10.5 命名区域 region
+
+`stage` 管**时间**（构建顺序），`region` 管**空间**（命名分区）。
+
+### 什么时候该分区：先问三个问题
+
+| 问自己 | 是 → 分区 |
+|---|---|
+| 这栋建筑里有"可以单独拿出来"的部分吗？（一栋楼、一个岛、一座塔、一道桥） | |
+| 以后会不会想单独搬动、复制、镜像、删除其中某一部分？ | |
+| 需不需要按部分查 lint、看 diff、单独导出？ | |
+
+**任一为"是"就分**。三个都"否"（单体建筑：一座教堂、一间小屋、一座桥）就**别分** ——
+分区本身不产生价值，它只是让"单独操作某一块"变得可能。
+
+具体到场景：
+
+| 场景 | 分不分 | 怎么分 |
+|---|---|---|
+| 一座教堂 / 一间小屋 / 一座塔 | ✗ | 用 `stage` 分步就够了 |
+| 空岛群、村落、建筑群 | ✓ | 每个岛/每栋楼一个 region |
+| 岛上有楼阁、城里分区 | ✓ | **嵌套**：楼阁套在岛的 `with` 里 |
+| 一座大楼里要单独搬动的部件（中庭 / 附楼 / 停机坪） | ✓ | 按部件名 region |
+| 大建筑想按块查问题 | ✓ | 分区后 `lint(region=...)`、`diff.by_region(w)` 才有意义 |
+
+### 和 stage 的分工（不冲突，可叠加）
+
+```python
+with w.stage("islands"):                 # 时间：这一轮做"群岛"
+    with w.region("island_a"):           # 空间：这个岛
+        build_island(w)
+    with w.region("island_b"):
+        build_island(w)
+```
+
+**判断口诀**：按"我要一次做完什么"切 → `stage`；按"我以后要单独动什么"切 → `region`。
+
+### 用法
+
+```python
+with w.region("island_a") as isl:
+    w.fill(box((0, 64, 0), (15, 64, 15)), "grass_block")
+    with w.region("pav_1") as p1:          # ← 嵌套：楼阁是岛的子区域
+        build_pavilion(w)
+    with w.region("pav_2") as p2:
+        build_pavilion(w)
+
+p1.translate((40, 0, 0))            # 单独搬楼阁（连它自己铺的地板一起）
+isl.translate((0, 0, 60))           # 搬岛 —— 两个楼阁跟着走
+p1.mirror(axis="x")                 # 镜像（含朝向翻转）
+c = p1.copy_to((0, 0, 40), name="pav_3")   # 复制一份，原区域保留
+p1.export_schem("out/pav_1.schem")  # 单独导出（平移到原点，方便粘贴）
+p1.export_tiled("out/pav_1_parts")  # 单独导出并按 48³ 分块
+```
+
+### 复制：`copy_to` 会连子区域一起复制
+
+```python
+island_b = isl.copy_to((40, 0, 0), name="island_b")
+# 新岛不只是体素 —— island_b/pav_1、island_b/pav_2 也一起建好了
+w.region_of("island_b/pav_1").translate((0, 0, 20))   # 仍然能独立操作
+```
+
+| 参数 | 说明 |
+|---|---|
+| `delta` | 位移 |
+| `name` | 新区域名（默认 `原名_copy`） |
+| `yaw` | 旋转复制（子区域绕**父的中心**转，不会错位） |
+| `with_children` | 默认 `True` 连子区域一起复制并重建层级；`False` 只复制体素 |
+
+子区域命名为 `新父名/原子名`（如 `island_b/pav_1`），一眼看出从属。
+**原区域保留不动** —— 这是"再造一个"而不是"搬过去"，搬移用 `translate`。
+
+> 空岛场景最常用的一招：造好一个岛 → 复制若干份 → 每份各自微调
+> （改楼阁朝向、换个材质、加段围墙），比从零建快得多。
+
+| 成员 | 说明 |
+|---|---|
+| `r.cells` | 我在这个区域里**写过**的格子（原始语义） |
+| `r.owned()` | **独占**的格子 ← 变换与导出都用它 |
+| `r.parent` / `r.children()` | 层级（嵌套时才有） |
+| `r.box` | 区域范围 |
+| `r.blocks()` / `r.histogram()` | 区域内实际的方块与统计 |
+| `w.region_of(name)` / `w.region_at(pos)` | 按名取、按坐标反查 |
+| `w.region_table()` | **一览表**（含层级、大小、作用格数） |
+| `w.regions` | `{name: Region}` |
+
+### 重叠归属：两条规则
+
+区域可以重叠（塔立在岛上、楼阁地板与岛面同格），归属规则是：
+
+| 规则 | 说明 |
+|---|---|
+| **后定义的拥有重叠部分** | 那格的内容确实是它写的。岛先铺地面、塔后立上去并自己铺了地基 → 地基归塔，搬走塔会连带搬走地基（原地留洞，这是拆除的正常结果） |
+| **祖先 / 后代互相豁免** | 岛上的楼阁能独立搬移，哪怕地板和岛面同格；搬岛时楼阁也跟着走 |
+
+实测：岛 64 格 + 塔 169 格、重叠 25 → 岛独占 39、塔独占 169（全部）；
+搬走塔后地基跟着走。而嵌套的楼阁则两边都能独立操作。
+
+`w.region_table()` 是建筑群开工前该先看一眼的东西：
+
+```python
+for r in w.region_table():
+    print("  " * r["depth"] + f"{r['name']} parent={r['parent']} "
+          f"cells={r['cells']} owned={r['owned']} op={r['op']}")
+# island   parent=None  cells=381 owned=381 op=381
+#   pav_1  parent=island cells=150 owned=150 op=150
+#   pav_2  parent=island cells=125 owned=125 op=125
+```
+
+`op` 是变换/导出**实际作用**的格数（自己的独占 + 各后代的独占）。
+
+> 同一个名字可以多次 `with`，内容会累积（适合分散在多处、逐步补完的建筑）。
+> 区域内涉及组件实例时，变换会自动 `unlink` 它们 —— 位置变了之后 patch 记录不再有效。
+> `region_at(pos)` 默认忽略空位置（问"这一点属于谁"通常关心有内容的地方）；
+> 查历史归属传 `solid_only=False`。
 
 ---
 
@@ -582,8 +1004,9 @@ print(w.render.budget(1200).slice(64))          # 限字符预算
 ```python
 # 三视图：水平 + X 剖面 + Z 剖面，center 接受 V / 锚点名 / Box
 print(w.render.view(center=(0,70,0), size=(16,12,16)))
-print(w.render.view(center=w.stage_box("nave")))
-print(w.render.view(center=w.instance("bay", 3).box))
+print(w.render.view(center=w.stage_box("nave")))              # 看某一阶段
+print(w.render.view(center=w.instance("bay", 3).box))         # 看某个实例
+print(w.render.view(center=w.region_of("island_a").box))      # 看某个分区 ← 建筑群时最常用
 
 # 全景 + 视口框（行首 '>' 标出视口所在行）
 print(w.render.overview(y=67, step=4, center=(0,70,0), size=(12,8,12)))
@@ -592,6 +1015,55 @@ print(w.render.overview(y=67, step=4, center=(0,70,0), size=(12,8,12)))
 **输出格式**：1 格 1 字符 + 每 5 格刻度尺 + 指北针（`N↑ = z 减小`）+ 自动图例。
 超预算自动降采样并标 `scale=1:N`。
 
+### 12.1 图像渲染（`w.image`，多模态预览）
+
+ASCII 验"几何对不对"，图像验**"好不好看"**——配色协调度、屋面层次是否被压死、
+云海像不像云，这些只有看图才发现得了。
+
+```python
+w.image.save("out/hero.png")                          # 整场
+w.image.save("out/pav.png", bx=w.stage_box("pavilion"))        # 只渲主阁
+w.image.save("out/pav.png", bx=w.stage_box("pavilion"), tw=16, bh=16)   # 放大特写
+w.image.save("out/hall.png", bx="hall")               # bx 也接受 mark_box 的区域名
+w.image.preview("out/hero.png")                       # 存完尝试调用系统看图器
+```
+
+| 参数 | 默认 | 含义 |
+|---|---|---|
+| `out` | — | 输出 PNG 路径（目录不存在会自动建） |
+| `bx` | `None` | 渲染范围（世界坐标闭区间）· `None`=整场 · 接受 `Box` / 六元组 / `mark_box` 名字 |
+| `tw` / `bh` | `8` / `8` | 每格的水平像素宽 / 高度像素。**局部特写就调大** |
+| `bg` / `horizon` | 天空蓝 | 背景渐变（上 → 地平线） |
+| `sky_gain` | `0.10` | 高度天光：高处略亮 |
+
+**取景要点**
+
+- `bx` 是**范围过滤**，不是剖切——跨界方块要么整块画、要么整块不画。取景留一格余量，
+  否则斜面屋顶边缘会出现锯齿状断口。
+- 相机固定在 `+x/+y/+z` 俯视，可见面固定为 顶面 / `+z`(南) / `+x`(东)。要看另一侧就
+  用 `rotate_area` 转场景，或换 `bx` 取景。
+- **`bx` 用负坐标没问题**（走的是 Python 参数，不是 shell）。命令行要 `--box=-32,...` 写法。
+
+**调色板**：默认表覆盖常见材质（石 / 木 / 海晶 / 玻璃 / 植被 / 光源…，约 90 个）。
+写自己的建筑时补齐缺的颜色，**未登记的方块走 `DEFAULT_COLOR` 灰褐，不会报错**：
+
+```python
+w.image.color("warped_planks", (43, 122, 122))          # 单个（链式）
+w.image.colors({                                        # 批量
+    "crimson_planks": (143, 58, 74),
+    "blackstone": (42, 36, 40),
+})
+```
+
+> **调色板随世界走，不是全局**。`w.image.color(...)` 只影响这一个 `World`；
+> `DEFAULT_PALETTE` 本身不会被改写（测试里会断言这点）。
+
+**性能**：5 万方块整场约 1.3 s；局部特写 0.1 s 级。图像内部有面剔除 + 画家算法，
+实心体内部不产生可见面。
+
+**与 ASCII 的分工**：`slice`/`section` 带坐标刻度，是**定位**工具（改哪一格）；
+`w.image` 不带坐标，是**验收**工具（整体观感）。两者互补，不要互相替代。
+
 ---
 
 ## 13. 校验 lint
@@ -599,7 +1071,7 @@ print(w.render.overview(y=67, step=4, center=(0,70,0), size=(12,8,12)))
 ```python
 issues = w.lint()
 for i in issues:
-    print(i.code, i.pos, i.block, i.msg)
+    print(i.code, i.level, i.pos, i.block, i.msg)
 ```
 
 | 码 | 级别 | 含义 |
@@ -608,42 +1080,112 @@ for i in issues:
 | `W1` | Warn | 重力方块下方悬空 / 装饰方块无支撑 / 悬挂类上方无支撑 |
 | `W2` | Warn | 双格方块（门 / 床）缺另一半 |
 | `W3` | Warn | 门外被实体方块堵住 |
-| `W4` | Warn | 存在与外部不连通的封闭空间 |
+| `W4` | Info | 存在与外部不连通的封闭空间 |
 | `W5` | Warn | 连接属性（墙/栅栏/玻璃板）与实际邻居不符 |
-| `W6` | Warn | 封闭空间内无光源 |
+| `W6` | Info | 封闭空间内无光源 |
 
-> W4/W6 在"门窗都关着"的建筑上必然出现，属正常告警，不必强行消除。
+> `W4`/`W6` 在"门窗都关着"的建筑上必然出现，所以降为 `Info` ——
+> 它们不该和真正的悬空/堵塞混在一起报警。
+
+### 分级：排序、按区域分解、过滤
+
+`lint()` 的结果按**严重度 → 码 → 坐标**排序（严重的不埋在末尾）。
+大建筑上告警会有成千条，用两个办法收窄：
+
+```python
+# ① 汇总：按码统计并分解到区域 —— 一眼看出"哪个建筑有问题"
+w.lint_summary()
+# {'W1': {'count': 1240, 'level': 'Warn', 'msg': '下方悬空，会被破坏掉落',
+#         'regions': {'nave': 900, 'tower': 340}, 'sample': (0,64,0)},
+#  'W4': {'count': 3, 'level': 'Info', ...}}
+#   按 count 降序返回
+
+# ② 过滤
+w.lint(level="warn")          # 只看建议修的
+w.lint(region="nave")         # 只看某个命名区域（也接受 Region 对象）
+w.lint(codes=("W1", "W2"))    # 只看这些码
+w.lint(region="tower", level="warn")   # 可组合
+```
+
+`w.report()` 的 LINT 段也会带上区域分布：
+
+```
+W1(Warn) x4  下方悬空，会被破坏掉落   区域: nave 4
+     (0,65,16)  torch
+     ...
+```
+
+> 想按"区域"收窄，前提是构建时用了 `with w.region(...)`（见 §10.5）。
+> 没分区的改动会归到 `(未分区)`。
 
 ---
 
 ## 14. 方块与别名
 
-### 中文别名（76 个，直接写中文即可）
+### 直接写英文 id，写错会被告知
 
-| | | | |
-|---|---|---|---|
-| 石头 → `stone` | 圆石 → `cobblestone` | 石砖 → `stone_bricks` | 苔石砖 → `mossy_stone_bricks` |
-| 裂纹石砖 → `cracked_stone_bricks` | 花岗岩 → `granite` | 闪长岩 → `diorite` | 安山岩 → `andesite` |
-| 砖块 → `bricks` | 砂岩 → `sandstone` | 红砂岩 → `red_sandstone` | 玻璃 → `glass` |
-| 玻璃板 → `glass_pane` | 黑曜石 → `obsidian` | 泥土 → `dirt` | 草方块 → `grass_block` |
-| 沙子 → `sand` | 砾石 → `gravel` | 雪块 → `snow_block` | 冰 → `ice` |
-| 地狱岩 → `netherrack` | 地狱砖 → `nether_bricks` | 石英块 → `quartz_block` | 末地石 → `end_stone` |
-| 深板岩 → `deepslate` | 深板岩砖 → `deepslate_bricks` | 黑石 → `blackstone` | 磨制黑石 → `polished_blackstone` |
-| 羊毛 → `white_wool` | 混凝土 → `white_concrete` | 陶瓦 → `white_terracotta` | 橡木木板 → `oak_planks` |
-| 云杉木板 → `spruce_planks` | 白桦木板 → `birch_planks` | 丛林木板 → `jungle_planks` | 金合欢木板 → `acacia_planks` |
-| 深色橡木木板 → `dark_oak_planks` | 橡木原木 → `oak_log` | 云杉原木 → `spruce_log` | 白桦原木 → `birch_log` |
-| 橡木木材 → `oak_wood` | 云杉木材 → `spruce_wood` | 橡木楼梯 → `oak_stairs` | 云杉楼梯 → `spruce_stairs` |
-| 石砖楼梯 → `stone_bricks_stairs` | 石楼梯 → `stone_stairs` | 圆石楼梯 → `cobblestone_stairs` | 橡木半砖 → `oak_slab` |
-| 石砖半砖 → `stone_bricks_slab` | 圆石半砖 → `cobblestone_slab` | 石砖墙 → `stone_bricks_wall` | 圆石墙 → `cobblestone_wall` |
-| 橡木栅栏 → `oak_fence` | 橡木门 → `oak_door` | 云杉门 → `spruce_door` | 火把 → `torch` |
-| 墙上火把 → `wall_torch` | 梯子 → `ladder` | 灯笼 → `lantern` | 灵魂灯笼 → `soul_lantern` |
-| 萤石 → `glowstone` | 书架 → `bookshelf` | 工作台 → `crafting_table` | 熔炉 → `furnace` |
-| 箱子 → `chest` | 床 → `red_bed` | 告示牌 → `oak_sign` | |
+**不需要**被下面那 76 条别名限制 —— 你的世界知识里有的是方块名，直接写就行。
+注册表覆盖 1.21.x 的 **1196 个方块**，写完自查：
 
-英文简写：`planks` `log` `stairs` `slab` `wall` `fence` `door` `wool` `concrete`
+```python
+from mcbuild import registry
 
-其他方块直接写英文 id（`prismarine_stairs` / `end_stone_bricks` / `white_concrete` …），
-未知方块按实心处理、不报错。
+registry.exists("waxed_oxidized_cut_copper_stairs")   # True
+registry.check("oak_stairz")
+#   "未知方块 'oak_stairz'；是否想写: oak_stairs / pale_oak_stairs / dark_oak_stairs ..."
+
+registry.search("banner")        # 32 个旗帜类方块名
+registry.search("_stairs")       # 所有楼梯
+registry.states("oak_stairs")    # {'facing': [...], 'half': [...], 'shape': [...], ...}
+registry.defaults("oak_stairs")  # {'facing': 'north', 'half': 'bottom', ...}
+```
+
+**整个建筑一起查**：
+
+```python
+for pos, bid, msg in w.unknown_blocks():
+    print(pos, msg)
+# (1,1,1) 未知方块 'minecraft:oak_stairz'；是否想写: oak_stairs / pale_oak_stairs ...
+```
+
+`unknown_blocks()` 每种方块只报一次（不会刷屏），且**跳过非 `minecraft:` 命名空间**
+—— mod 方块（`create:cogwheel`）不会被当成错误。
+
+> 逐格写错名不会当场抛异常（那样太吵，而且 mod 方块无法预判），
+> 所以这是事后自查的入口。别把它当成每步必跑 —— 通常写完一段再查一次。
+
+### 属性校验也来自真实数据
+
+方块**属性**的合法取值同样从这份数据来（1196 个方块的真实定义），
+不再是手写的十几个"族"兜底：
+
+```python
+w.set(pos, "lantern", hanging="true")        # ✅ 手写表里 lantern 没属性，现在能校验
+w.set(pos, "redstone_wire", power="13")      # ✅ 0..15
+w.set(pos, "redstone_wire", power="20")      # ✗ BlockStateError（可用 0..15）
+w.set(pos, "oak_stairs", shape="inner_left") # ✅
+w.set(pos, "oak_stairs", shape="banana")     # ✗ BlockStateError
+```
+
+`registry` 里没有的方块（mod、更晚的版本）自动回退到内置的族规则，不会误拦。
+
+> 顺带：**默认值不再造成比较误报**。`oak_door[half=lower]` 和
+> `oak_door[half=lower,hinge=left]` 语义相同，`compare` 会先补全默认值再比 ——
+> 所以属性**不用**刻意写全了。
+
+### 别名：只有英文简写
+
+```python
+w.set(pos, "planks")        # → minecraft:oak_planks
+w.set(pos, "stairs")        # → minecraft:oak_stairs
+```
+
+完整表：`planks` `log` `stairs` `slab` `wall` `fence` `door` `wool` `concrete`。
+
+其余**一律直接写英文 id**（`prismarine_stairs` / `end_stone_bricks` / `white_concrete` …）。
+带命名空间的（`minecraft:stone` / `create:cogwheel`）原样保留。
+
+> 直接用真名 —— 写错了 `registry.check()` 会告诉你。
 
 ### 方块族判定（决定它接受哪些属性）
 
@@ -689,16 +1231,109 @@ w.set((0,64,0), "oak_log", axis="w")
 
 ```python
 w.export_schem("out/a.schem")            # Sponge v3，WorldEdit / Litematica 通用
-w.export_nbt("out/a.nbt")                # 结构方块格式（≤48³）
-w.export_json("out/a.json")              # 可回放，含锚点
+w.export_nbt("out/a.nbt")                # 结构方块格式（单块 ≤48³）
+w.export_json("out/a.json")              # 可回放，含锚点、方块实体、实体
 w2 = World.load("out/a.json")
+
+w3 = World.from_schem("out/a.schem")     # 从 .schem 新建，还原到导出时的位置
+w3.import_schem("tower.schem", at=(10, 64, 10))   # 当零件摆到指定位置
 ```
 
-导出时自动计算墙 / 栅栏 / 玻璃板的连接属性 —— **在副本上算，不会污染原世界**。
-因此 `w.get(pos)` 读到的仍是没有连接信息的原始方块，连接属性只存在于导出产物里。
+**往返保真**：`.schem` 的 `Offset` 记的是导出时的世界原点，所以"导出再导入"
+能回到原来的位置（非原点建筑也一样）。方块实体与实体一并还原。
+给了 `at=` 就忽略 `Offset`，落到指定坐标 —— 这是把外部零件当积木用的方式。
 
-> 结构方块 `.nbt` 上限 48×48×48；更大的建筑要分块导出（`export_tiled` 尚未实现，
-> 目前可手动分区域多次导出）。
+导出时自动计算墙 / 栅栏 / 玻璃板的连接属性 —— **在副本上算，不会污染原世界**。
+因此 `w.get(pos)` 读到的仍是没有连接信息的原始方块；也正因为如此，
+导入回来的连接类方块会带上这些属性（往返时这部分 state 会多出来，属预期）。
+
+### 分块导出 `export_tiled`
+
+结构方块单块上限 48³，教堂尺度必须切开：
+
+```python
+parts = w.export_tiled("out/cathedral", chunk=48, prefix="cath")
+for it in parts:
+    print(it["file"], it["box"], it["blocks"])
+# cath_0_0_0.nbt (-20,57,-8)..(20,104,39) 21170
+# cath_0_0_1.nbt (-23,61,40)..(23,104,87) 24315
+# ...
+```
+
+| 返回字段 | 含义 |
+|---|---|
+| `file` | 文件名（`prefix_ix_iy_iz.nbt`） |
+| `box` | 该块覆盖的**世界坐标**范围 |
+| `blocks` | 该块方块数 |
+
+各块的 `box` 并集精确等于原包围盒，方块总数不变（实测 7 块 63513 = 63513）。
+每块导出文件是紧凑的 0-based，按 `box.lo` 定位摆回即可还原。
+`ext="schem"` 可改成输出 `.schem`。
+
+### 多 agent / 多进程协作
+
+框架的协作模型是**空间分工 + 文件合并**，不是共享同一个 `World`。
+
+**分工方**：各建各的，导出时带上区域
+
+```python
+w = World()
+with w.region("island_a") as isl:
+    build_island(w)
+    with w.region("pav_1"):
+        build_pavilion(w)
+isl.export_schem("out/island_a.schem")   # 区域结构随文件走
+print(w.render.overview(step=2))         # 自检
+print(w.lint(region="island_a"))         # 自检
+```
+
+**汇合方**：按坐标拼起来
+
+```python
+w = World()
+w.import_schem("out/island_a.schem", at=(0, 64, 0))
+w.import_schem("out/island_b.schem", at=(60, 64, 0))
+w.region_table()
+# island_a         parent=None       op=148
+# island_b         parent=None       op=148
+#   island_a/pav_1  parent=island_a  op=64
+#   island_b/pav_1  parent=island_b  op=64
+```
+
+**区域随文件走**：`export_schem` 把命名分区写进 `.schem` 的自定义字段，
+导入时自动重建（父子关系一起）。合并之后仍然能按区域操作 ——
+否则拿到手的只是一堆体素，搬不动、查不了、分不开。
+
+子区域重名时自动带上父名前缀（`island_b/pav_1`），不是干巴巴的 `pav_1@2`。
+
+**外部文件**（WorldEdit / Litematica / 网上下载的 `.schem`）没有区域信息，
+导入时用**文件名**建一个区域把整块圈进去；可用 `name=` / `prefix=` 覆盖：
+
+```python
+w.import_schem("castle_tower.schem", at=(10, 64, 10), prefix="src/")
+# → 区域 src/castle_tower，可以单独搬移 / 导出
+```
+
+**冲突检测**：`w.merge(other, on_conflict=...)`
+
+| 模式 | 冲突位置（两边都有方块且不同）怎么办 |
+|---|---|
+| `"overwrite"`（默认） | 用对方的 |
+| `"skip"` | 保留自己的 |
+| `"report"` | **不写入**，只列出来，先看清楚再决定 |
+
+```python
+rep = w.merge(part_b, on_conflict="report")
+if rep["conflict_count"]:
+    for pos, mine, theirs in rep["conflicts"][:10]:
+        print(pos, mine.short(), "->", theirs.short())
+```
+
+返回 `{added, overwritten, skipped, conflict_count, conflicts, regions, entities}`。
+"冲突"用**归一化比较** —— 一边写 `hinge` 一边缺省不算冲突。
+
+> 两个 agent 同时写同一个 `World` 不是支持的用法（没有并发原语）。
+> 正确做法是各建各的、文件交换、由一方合并。
 
 ---
 
@@ -767,6 +1402,9 @@ w.export_schem("out/nave.schem")
 | `ValueError: 阶段 ... 没有可重跑的函数` | 用 `with w.stage(...)` 建的阶段去 `rerun` | 改用 `w.stage(name, fn)` |
 | `ValueError: set() 需要 block 或 blockstate 参数` | `set(pos)` 少了方块 | 补上 |
 | `ValueError: 空世界，无法导出` | 没写任何方块就导出 | 先建东西 |
+| `ValueError: 空世界，无法渲染` | 空世界调 `w.image.save()` | 先建东西，或给非空 `bx` |
+| `ValueError: 区域内没有可见方块` | `w.image` 的 `bx` 里全是空气 | 检查 `bx` 范围 / 用带坐标的 `slice` 先定位 |
+| `ValueError: 未定义的区域锚点` | `w.image` 的 `bx` 传了不存在的 `mark_box` 名 | 用 `w.marks.boxes` 看现有区域名 |
 
 ---
 
@@ -789,5 +1427,34 @@ define 需要的组件 → stage 建 → slice/section 检查 → compare 对称
 ⑥ 最后 revision：改模板 replay / 局部 patch / unlink 转义
 ```
 
+**建筑群 / 空岛群（多个独立单元）** ← 这种形态**必须分区**，否则后期搬不动
+
+```
+① 每个岛 / 每栋楼开一个 region；从属关系用嵌套表达
+   with w.region("island_a") as a:
+       build_island(w)
+       with w.region("pav_1") as p:     # 岛上的楼阁
+           build_pavilion(w)
+② w.region_table() 确认层级与大小（op 是各区域实际作用的格数）
+③ 位置不合适就按区域搬：a.translate(...) —— 不用重跑脚本
+④ 缺一个就复制一个：p.copy_to((0, 0, 40), name="pav_2")   # 连子区域一起复制
+⑤ 出了问题按区域收窄：w.lint(region="island_a")、d.by_region(w)、a.export_schem(...)
+⑥ 交付时可以每栋楼一个文件：for r in w.region_table(): w.region_of(r["name"]).export_schem(...)
+```
+
+> 建筑群的常见失误是**一开始不分，建完才想搬** —— 那时候只能整片挪，
+> 挪完还得手工修接缝。开第一个岛的时候就该开 region。
+
 **每轮反馈只看三样**：`w.report()` 的四段、`w.render.view(...)` 的局部、
 `w.compare` 的差异列表。**不要**输出整个世界。
+
+**视觉检查**（多模态环境）：`w.render` 全绿只说明几何成立，不说明好看。
+收尾时渲一张 `w.image.save("out/final.png")` 自己看，重点查三件事：
+
+1. **视线是否被压死**——远景或配属建筑有没有被主体的屋檐完全遮住（坐标上不冲突，
+   投影到图上才发现得了）；
+2. **云 / 植被 / 水面这类"软"材质读起来对不对**——形状是否碎成噪点、颜色在背景上
+   是否还立得住（白背景 + 白云 = 看上去是雪原）；
+3. **重色是否堆在一处**——屋面 / 木构 / 台基的明度层次有没有分开。
+
+发现问题就回去改脚本重渲，**不要**靠 ASCII 猜。
