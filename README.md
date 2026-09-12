@@ -17,6 +17,7 @@ See examples:
 ![EXAMPLE-PICTURE](./demo/284.png)
 ---
 
+
 ## ✨ Why BlockScript?
 GPT6-Astra生成的Minecraft建筑非常不错，但是太贵了，我需要更便宜的
 
@@ -31,10 +32,9 @@ Potential future directions include:
 * more powerful component composition
 * better LLM-oriented error messages
 * incremental build / repair workflows
-* richer textual visualization
-* additional schematic formats
-* multimodal build feedback
-* agent-based iterative construction
+* 超大型结构处理优化
+* 更好的视觉渲染接入
+* 更好的智能体团队任务支持
 
 ---
 
