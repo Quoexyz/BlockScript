@@ -1,11 +1,13 @@
 # mcbuild 模型 API 手册
 
-> **目标读者：LLM。代码量较大，非必要不读用不上的源码，这份文档就是全部接口。**
-> 版本 0.3.1 · 2026-09-11 · 22 个模块 / `World` 上 82 个公开方法 / 零第三方依赖
-
+> **目标读者：LLM**
+> 版本 0.4.0
+tips:
+可以辅助阅读examples，但不要忽略其目录下README.txt
+如果没有明确说明，按照原版Minecraft1.21.8
 ---
 
-## 1. 十二条铁律
+## 1. 常规要求
 
 违反这些的代码大概率跑不通或产出废建筑。**先读完这节再动手。**
 
@@ -22,10 +24,11 @@
 | 9 | **写完就渲染检查**；大范围或破坏性操作先 `w.preview(...)` 看报价 | 反馈闭环是这个框架的全部价值；大范围误操作很难精确回滚 |
 | 10 | **重复单元用 `w.material(...)` 加材质差异** | 20 个开间像素级相同 = 一眼假 |
 | 11 | **非法 blockstate 会抛异常**，不会静默兜底 | 这是故意的，早暴露早修 |
-| 12 | **有多个独立单元时用 `w.region(...)` 分区**（建筑群 / 空岛群 / 以后想单独搬动的部件） | 单体建筑别分——分区是为了**操作**，不是为了整齐。判断见 §10.5 |
+| 12 | **伪随机只走 `mcbuild.det`，绝不用 Python 的 `hash()`** | 字符串哈希受 `PYTHONHASHSEED` 随机化，**换个进程结果就全变，而且不报错** —— 你只会发现"每次重建的图都不一样"（§2.13） |
+| 13 | **分块导出的坐标只能从 `box` 读，不许从文件名推** | 瓦片文件里的 `pos` 相对**它自己的紧包围盒**，中间那一项在文件里已经丢了。推出来**每块都偏**，而 zlib / NBT / 扇区表这些局部校验**全靠照样通过**（§15「读回分块」） |
 
 > ASCII 能验"几何对不对"，验不了"好不好看"。**美术验收用 `w.image` 渲一张 PNG
-> 自己看**（§12.1）：配色、层次、云海形态这类问题只有看图才发现得了。
+> 自己看**（§12.1）：配色、层次、云海形态这类问题只有看图才发现得了。（多模态环境）
 > 纯 ASCII 环境下可跳过，不影响构建流程。
 
 ---
@@ -61,13 +64,16 @@
 | `region_at` | `region_at(pos, solid_only=True) -> Region \| None` | 反查某坐标属于哪个区域（取最深） |
 | `region_table` | `region_table(sort_by="name") -> List[dict]` | 区域一览（含层级与大小） |
 | `unknown_blocks` | `unknown_blocks() -> List[(V, id, msg)]` | 列出拼错的方块 |
-| `lint` | `lint() -> List[Issue]` | 物理校验 |
+| `lint` | `lint(region=None, level=None, codes=None, bbox=None)` | 物理校验（**大世界必传 `region=` 或 `bbox=`**，见 §13） |
+| `lint_summary` | `lint_summary(region=None, bbox=None) -> dict` | 按码汇总并分解到区域 |
 | `report` | `report(exec_line="", render_box=None) -> str` | 四段式反馈文本 |
 | `save` / `load` | `save(path)` / `World.load(path)` | JSON 存档 / 读档 |
-| `import_schem` | `import_schem(path, at=None)` | 读 `.schem` 合并进来（当零件用） |
+| `import_schem` | `import_schem(path, at=None, regions=True)` | 读 `.schem` 合并进来（当零件用） |
+| `from_schem` | `World.from_schem(path, at=None)` | 从 `.schem` **新建**一个 World |
 | `export_tiled` | `export_tiled(dir, chunk=48, prefix)` | **分块导出**（结构方块 48³ 上限） |
+| `merge` | `merge(other, on_conflict="overwrite")` | 合并另一个世界，**返回冲突报告** |
 
-属性：`w.query` · `w.render` · `w.image` · `w.compare` · `w.marks` · `w.cells` · `w.instances` · `w.stages` · `w.grids`
+属性：`w.query` · `w.render` · `w.image` · `w.camera` · `w.compare` · `w.marks` · `w.cells` · `w.instances` · `w.stages` · `w.grids` · `w.regions`
 
 ### 2.2 轴网（`grid.py`，挂在 World 上）
 
@@ -196,9 +202,9 @@
 
 ### 2.11 导入导出（`io.py`）
 
-`export_schem` · `export_nbt` · `export_json` · `export_tiled` ·
-`import_json` · `import_schem` · `merge`（带冲突报告）·
-`loads_nbt` / `loads_nbt_gz`（NBT 解析）· `parse_block_key`
+`export_schem` · `export_nbt` · `export_json` · `export_tiled` · **`merge`** ·
+`import_json` · `import_schem` · `World.from_schem` ·
+`loads_nbt` / `loads_nbt_gz`（NBT 解析）· `nbt_value` · `parse_block_key`
 
 ---
 
@@ -214,9 +220,43 @@
 | `defaults(name) -> dict` | 该方块的默认属性 |
 | `label(name) -> str \| None` | 英文显示名 |
 | `info() -> dict` | 数据来源与覆盖范围 |
+覆盖 1.21.x 的 **1196 个方块**。
 
-数据来自 **prismarinejs/minecraft-data**（MIT），覆盖 1.21.x 的 **1196 个方块**，
-随库分发（16 KB gzip），零第三方依赖。
+### 2.13 确定性（`mcbuild.det`）
+
+| 函数 | 作用 |
+|---|---|
+| `hash64(seed, *vals) -> int` | 任意整数序列 → 64 位整数（splitmix64 变体） |
+| `unit(seed, *vals) -> float` | `[0, 1)` 的确定性伪随机（取高 53 位） |
+| `in_range(seed, lo, hi, *vals) -> int` | `[lo, hi]` 闭区间内的确定性整数 |
+| `lerp(a, b, t) -> float` | 线性插值 |
+| `profile_at(points, t) -> float` | 分段线性插值，用来描述**纵剖面** |
+| `wobble(seed, theta, amp=0.14, k=3) -> float` | 圆周上的形状扰动（**四阶低频谐波**叠加） |
+| `M64` / `TAU` | 常量 |
+
+**所有伪随机必须走这里**（铁律 12）。它不是"随机数库"，是"**可复现**的随机数库"：
+同一个 `seed` + 同一组参数，跨进程、跨机器永远是同一个值。
+
+两条容易踩的（都写在模块 docstring 里）：
+- **别用 Python 的 `hash()`** —— 字符串哈希受 `PYTHONHASHSEED` 随机化，换进程就变，
+  而且**不报错**，你只会发现"每次重建的图都不一样"。
+- **`wobble` 刻意用低阶正弦而不是噪声** —— 1 格分辨率的体素里，高阶噪声只会碎成锯齿；
+  但只用一两个谐波，轮廓又会是"压扁的圆"，所以要四个不同阶的叠起来。
+
+### 2.14 导出存档（`mcbuild.anvil`）
+
+把世界写成**能被 Minecraft 直接打开**的存档（Anvil `.mca`），
+而不只是"还得拿结构方块手工贴"的结构文件。**完整说明见 §15「导出存档」**。
+
+| 函数 | 作用 |
+|---|---|
+| `write_save(world, out_dir, name=..., seed=..., data_version=4440)` | 写整套：`level.dat` + `region/r.*.mca` |
+| `write_level_dat(path, ...)` | 只写世界元数据（含全空气平坦生成器） |
+| `write_region(path, chunks)` / `make_chunk(...)` / `make_section(...)` | 底层：区域 / 区块 / 子区块 |
+| `pack(idx, bits, n)` / `bits_for(count, floor4=True)` | 位打包（区块格式的核心，见 §15「导出存档」） |
+| `verify_save(dir, expect_blocks=None)` | **不启动游戏**地反解回读校验 |
+| `probe_column(dir, x, z, y0, y1)` | 读存档里某一列的方块（复核某个特征建出来没有） |
+| `DATA_VERSION` / `MAX_SPAN` | 目标版本号 / 内容允许的最大纵向跨度 |
 
 ---
 
@@ -717,7 +757,7 @@ w.unlink(w.instance("bay", 5))
 
 ## 9. 比较器 compare
 
-**大建筑里对称错误是最常见的低级错误，而它在 ASCII 里肉眼几乎看不出来。**
+**大建筑里对称错误是最常见的低级错误，而它在 ASCII 里肉眼几乎看不出来。** 注意对称性不是强制性要求，不对称的状况在建筑和环境中也是常见且正常的。
 
 ```python
 diffs = w.compare.symmetry(box((-12,63,-12),(12,96,12)), axis="x")
@@ -845,49 +885,12 @@ w.replay("bay")              # ✅ 重放，且每个实例的局部覆盖逐条
 
 `meta=False` 可关掉这些元数据（只存体素，文件更小）。
 
-> **`stage` 切的是时间。** 如果建筑里有多个**独立单元**（建筑群、空岛群、
-> 以后想单独搬动的部件），还需要按**空间**切分 —— 见下一节。
-
 ---
 
 ## 10.5 命名区域 region
 
 `stage` 管**时间**（构建顺序），`region` 管**空间**（命名分区）。
-
-### 什么时候该分区：先问三个问题
-
-| 问自己 | 是 → 分区 |
-|---|---|
-| 这栋建筑里有"可以单独拿出来"的部分吗？（一栋楼、一个岛、一座塔、一道桥） | |
-| 以后会不会想单独搬动、复制、镜像、删除其中某一部分？ | |
-| 需不需要按部分查 lint、看 diff、单独导出？ | |
-
-**任一为"是"就分**。三个都"否"（单体建筑：一座教堂、一间小屋、一座桥）就**别分** ——
-分区本身不产生价值，它只是让"单独操作某一块"变得可能。
-
-具体到场景：
-
-| 场景 | 分不分 | 怎么分 |
-|---|---|---|
-| 一座教堂 / 一间小屋 / 一座塔 | ✗ | 用 `stage` 分步就够了 |
-| 空岛群、村落、建筑群 | ✓ | 每个岛/每栋楼一个 region |
-| 岛上有楼阁、城里分区 | ✓ | **嵌套**：楼阁套在岛的 `with` 里 |
-| 一座大楼里要单独搬动的部件（中庭 / 附楼 / 停机坪） | ✓ | 按部件名 region |
-| 大建筑想按块查问题 | ✓ | 分区后 `lint(region=...)`、`diff.by_region(w)` 才有意义 |
-
-### 和 stage 的分工（不冲突，可叠加）
-
-```python
-with w.stage("islands"):                 # 时间：这一轮做"群岛"
-    with w.region("island_a"):           # 空间：这个岛
-        build_island(w)
-    with w.region("island_b"):
-        build_island(w)
-```
-
-**判断口诀**：按"我要一次做完什么"切 → `stage`；按"我以后要单独动什么"切 → `region`。
-
-### 用法
+建筑群、稀疏空岛这类场景里，每栋楼/每个岛都要能独立搬移、旋转、导出：
 
 ```python
 with w.region("island_a") as isl:
@@ -904,27 +907,6 @@ c = p1.copy_to((0, 0, 40), name="pav_3")   # 复制一份，原区域保留
 p1.export_schem("out/pav_1.schem")  # 单独导出（平移到原点，方便粘贴）
 p1.export_tiled("out/pav_1_parts")  # 单独导出并按 48³ 分块
 ```
-
-### 复制：`copy_to` 会连子区域一起复制
-
-```python
-island_b = isl.copy_to((40, 0, 0), name="island_b")
-# 新岛不只是体素 —— island_b/pav_1、island_b/pav_2 也一起建好了
-w.region_of("island_b/pav_1").translate((0, 0, 20))   # 仍然能独立操作
-```
-
-| 参数 | 说明 |
-|---|---|
-| `delta` | 位移 |
-| `name` | 新区域名（默认 `原名_copy`） |
-| `yaw` | 旋转复制（子区域绕**父的中心**转，不会错位） |
-| `with_children` | 默认 `True` 连子区域一起复制并重建层级；`False` 只复制体素 |
-
-子区域命名为 `新父名/原子名`（如 `island_b/pav_1`），一眼看出从属。
-**原区域保留不动** —— 这是"再造一个"而不是"搬过去"，搬移用 `translate`。
-
-> 空岛场景最常用的一招：造好一个岛 → 复制若干份 → 每份各自微调
-> （改楼阁朝向、换个材质、加段围墙），比从零建快得多。
 
 | 成员 | 说明 |
 |---|---|
@@ -1004,9 +986,8 @@ print(w.render.budget(1200).slice(64))          # 限字符预算
 ```python
 # 三视图：水平 + X 剖面 + Z 剖面，center 接受 V / 锚点名 / Box
 print(w.render.view(center=(0,70,0), size=(16,12,16)))
-print(w.render.view(center=w.stage_box("nave")))              # 看某一阶段
-print(w.render.view(center=w.instance("bay", 3).box))         # 看某个实例
-print(w.render.view(center=w.region_of("island_a").box))      # 看某个分区 ← 建筑群时最常用
+print(w.render.view(center=w.stage_box("nave")))
+print(w.render.view(center=w.instance("bay", 3).box))
 
 # 全景 + 视口框（行首 '>' 标出视口所在行）
 print(w.render.overview(y=67, step=4, center=(0,70,0), size=(12,8,12)))
@@ -1044,8 +1025,29 @@ w.image.preview("out/hero.png")                       # 存完尝试调用系统
   用 `rotate_area` 转场景，或换 `bx` 取景。
 - **`bx` 用负坐标没问题**（走的是 Python 参数，不是 shell）。命令行要 `--box=-32,...` 写法。
 
-**调色板**：默认表覆盖常见材质（石 / 木 / 海晶 / 玻璃 / 植被 / 光源…，约 90 个）。
-写自己的建筑时补齐缺的颜色，**未登记的方块走 `DEFAULT_COLOR` 灰褐，不会报错**：
+**颜色**：默认走**真实贴图色表**（`data/colors.json.gz`，**1177 个方块**——
+下载客户端 jar、提取方块贴图 PNG、算 **alpha 加权平均色**，再乘生物群系色调；
+由 `tools/build_colors.py` 生成）。手写表（约 90 个）只在真实表缺失时兜底。
+
+> **`w.image` 和 `w.camera` 共用同一张颜色表**（都挂在同一个 World 上），
+> 所以 `w.image.color(...)` 设一次，等距和透视两种渲染都跟着变。
+
+查找顺序：
+
+| 顺序 | 来源 | 说明 |
+|---|---|---|
+| 1 | `w.image.color(...)` 设过的 | 你显式指定的，最高优先 |
+| 2 | **印象色** | 贴图平均会失真的那批 → 用手写值（见下） |
+| 3 | 真实贴图色 | 1177 个方块 |
+| 4 | 手写表 | 真实表没有的少数特例 |
+| 5 | **继承**基础材质 | `stone_brick_wall` → `stone_bricks`、`oak_button` → `oak_planks` |
+| 6 | `DEFAULT_COLOR` | 灰褐兜底 |
+
+**为什么要"印象色"这一步**：贴图的 alpha 加权平均对两类方块会失真 ——
+小物件/多彩贴图（白郁金香被绿花蕊拉暗 238→133、灯笼被暗部拉暗 179→96）、
+顶面与侧面用不同贴图的（草方块被侧面土色拉暗 135→94）。判据是
+**手写值比真实值亮 1.35 倍以上**，自动算出来，当前命中 13 个
+（草、蕨、蒲公英、灯笼、火把、白郁金香、樱花花瓣、黑曜石…）。
 
 ```python
 w.image.color("warped_planks", (43, 122, 122))          # 单个（链式）
@@ -1056,13 +1058,62 @@ w.image.colors({                                        # 批量
 ```
 
 > **调色板随世界走，不是全局**。`w.image.color(...)` 只影响这一个 `World`；
-> `DEFAULT_PALETTE` 本身不会被改写（测试里会断言这点）。
+> `DEFAULT_PALETTE` 与真实色表都不会被改写（测试里会断言这点）。
+> 数据文件缺失时自动退回手写表，不影响任何功能。
 
 **性能**：5 万方块整场约 1.3 s；局部特写 0.1 s 级。图像内部有面剔除 + 画家算法，
 实心体内部不产生可见面。
 
 **与 ASCII 的分工**：`slice`/`section` 带坐标刻度，是**定位**工具（改哪一格）；
 `w.image` 不带坐标，是**验收**工具（整体观感）。两者互补，不要互相替代。
+
+### 12.2 第一人称透视（`w.camera`，站在建筑里往外看）
+
+`w.image` 是**等距平行投影** —— 没有视点、视线互相平行，所以**没有近大远小**。
+看整体比例好用，但站在走廊里看两端的墙会一样大，读不出纵深。**室内必须用透视**。
+
+```python
+w.camera.shot("out/inside.png",
+              eye=(2.5, 66.6, 5.5),        # 眼睛位置，**可给浮点**
+              look_at=(2.5, 66.0, 24.0),   # 看向哪
+              fov=70)                       # 水平视场角
+
+# 或给角度：朝西偏下 8 度
+w.camera.shot("out/back.png", eye=(2.5, 66.6, 24.0), yaw=270, pitch=-8)
+```
+
+| 参数 | 说明 |
+|---|---|
+| `eye` | 眼睛位置，**可给浮点**（`(2.5, 66.6, 5.5)` 站在两格之间） |
+| `look_at` | 看向的点；与 `yaw`/`pitch` 二选一 |
+| `yaw` | 与 `rot_y` 一致，俯视顺时针：`0` 朝 +z（南）· `90` 朝 -x（西）· `180` 北 · `270` 东 |
+| `pitch` | **向下为正**（和 Minecraft 一致） |
+| `fov` | 水平视场角，游戏常用 70 |
+| `width` / `height` | 出图尺寸（默认 960×540） |
+| `bx` / `max_dist` | 限制遍历范围 / 最远距离（内部拍摄用不到远景） |
+
+> 颜色与 `w.image` **共用同一张表** —— `w.image.color(...)` 设一次，两边都生效。
+> 默认色也一样：真实贴图色 → 手写印象色 → 继承（见 §12.1）。
+
+**两个渲染器的分工**：
+
+| | `w.image`（等距） | `w.camera`（透视） |
+|---|---|---|
+| 投影 | 平行，无视点 | 针孔相机 |
+| 强项 | 整体比例、一眼看全 | 人视角、纵深、遮挡 |
+| 用在 | 外部全景验收 | 室内 / 特写 / "站这儿看是什么样" |
+
+> **六个面都支持。** 站在屋里往北看是北墙的南侧面、往南看是南墙的北侧面 ——
+> 等距那套只画顶/南/东三个面，室内会缺面，这条是透视渲染必须重写的地方。
+>
+> **性能反而更快**：透视视场只有 70°，视锥剔除后只看一个方向上的方块。
+> 实测 960×540 内部拍摄约 0.6–1.3 s（全景等距要 1 s 以上）。
+>
+> **已知限制**：画家算法按面中心距离排序，相机**贴脸**某一格时，那格自己的
+> 几个面可能互相遮挡错乱。体素是轴对齐的，绝大多数角度没事 ——
+> 真要贴脸看某一格，改用带坐标的 `w.render.section()`。
+>
+> 相机落在方块内部时会报 `ValueError`（提示被包住了），不会默默给一张糊图。
 
 ---
 
@@ -1117,6 +1168,57 @@ W1(Warn) x4  下方悬空，会被破坏掉落   区域: nave 4
 
 > 想按"区域"收窄，前提是构建时用了 `with w.region(...)`（见 §10.5）。
 > 没分区的改动会归到 `(未分区)`。
+
+### 扫描范围 `bbox` —— 稀疏大世界必须传
+
+`lint(…, bbox=None)` 控制**扫哪些格子**。给定时只遍历盒内方块，并把该盒
+当作"世界边界"；盒外的方块仍能被 `world.get()` 读到，所以靠邻居判断的
+W1 / W3 / W5 结论与扫全世界**逐条一致**。
+
+```python
+w.lint(bbox=((0, 96, 0), (21, 106, 21)))        # 两角坐标
+w.lint(bbox=box((0, 96, 0), (21, 106, 21)))     # box() 的结果
+w.lint(region="nave")                            # ← 自动取 region.box，不用手传
+```
+
+三种写法都收：`Box`、`((x,y,z),(x,y,z))` 两角、`box(a, b)`。
+传别的（比如 6 个整数）抛 `ValueError` —— 不猜。
+
+**为什么必须有这个参数**：`W4` / `W6` 的封闭空间检测要在包围盒上做**洪泛填充**，
+盒越大越慢。实测同一座 8,807 格的岛：
+
+| 场景 | 世界包围盒 | `lint(region="isl_0")` |
+|---|---|---|
+| 岛单独放在小世界里 | 1.8 万格 | **0.075 s** |
+| 同一座岛，另有一座岛在 900 格外 | **974 万格** | **65.2 s** |
+
+**867×**。而 1000×1000 空岛图的包围盒约 **1.3 亿格**，会直接把进程拖死。
+收窄后（两种调用都取 `region.box`）耗时回到 0.075 s 量级，结论不变。
+
+> `W4` / `W6` 的位置是**空气格**（封闭空间里的一个样本），不在 `region.cells` 里 ——
+> 按坐标过滤时它们靠 `lint.AIR_LOCATED_CODES` 放行，不会被静默吞掉。
+
+#### 兜底闸：盒子太大就跳过，而不是假装查过
+
+`bbox=` 只解决"**几个簇相距很远**"，解决不了"**单个区域本身就是一条长对角线**" ——
+比如一条 650 格长的斜向桥，内容是稀疏的，包围盒却是 655×301×655 ≈ **1.29 亿格**。
+
+所以 `_enclosed_air` 另有两道闸：
+
+| 常量 | 默认 | 作用 |
+|---|---|---|
+| `lint.ENCLOSED_MAX_BOX` | `12_000_000`（≈229³） | 盒子体积超限就**直接放弃**，连盒表面都不枚举 |
+| `lint.ENCLOSED_LIMIT` | `2_000_000` | 洪泛访问的空气格数上限 |
+
+触发时 `lint` 会**显式报一条 Info**，而不是静默当作"没有封闭空间"：
+
+```
+W4 Info (173,0,173) air  封闭空间检测已跳过：扫描盒 129,000,000 格过大
+       （上限 12,000,000 格 / 2,000,000 空气格）。用更小的 bbox= 或 region= 分段查
+```
+
+现有几个示例的盒子都远小于阈值（最大的云海浮阁 117×70×100 ≈ 82 万），不会被误伤。
+**真要在超限的结构上查密闭空间，就把 `bbox=` 切成几段分别查。**
 
 ---
 
@@ -1185,7 +1287,9 @@ w.set(pos, "stairs")        # → minecraft:oak_stairs
 其余**一律直接写英文 id**（`prismarine_stairs` / `end_stone_bricks` / `white_concrete` …）。
 带命名空间的（`minecraft:stone` / `create:cogwheel`）原样保留。
 
-> 直接用真名 —— 写错了 `registry.check()` 会告诉你。
+> **中文别名已移除**。模型本来就知道方块名；而中文译名各家不一
+> （"石砖"既可能是 `stone_bricks` 也可能是 `brick`），维护一份随时过时的映射表
+> 不如直接用真名 —— 写错了 `registry.check()` 会告诉你。
 
 ### 方块族判定（决定它接受哪些属性）
 
@@ -1267,73 +1371,167 @@ for it in parts:
 | `blocks` | 该块方块数 |
 
 各块的 `box` 并集精确等于原包围盒，方块总数不变（实测 7 块 63513 = 63513）。
-每块导出文件是紧凑的 0-based，按 `box.lo` 定位摆回即可还原。
+每块导出文件是紧凑的 0-based，**按 `box.lo` 定位摆回即可还原**。
 `ext="schem"` 可改成输出 `.schem`。
 
-### 多 agent / 多进程协作
+两个可选参数：
 
-框架的协作模型是**空间分工 + 文件合并**，不是共享同一个 `World`。
-
-**分工方**：各建各的，导出时带上区域
-
-```python
-w = World()
-with w.region("island_a") as isl:
-    build_island(w)
-    with w.region("pav_1"):
-        build_pavilion(w)
-isl.export_schem("out/island_a.schem")   # 区域结构随文件走
-print(w.render.overview(step=2))         # 自检
-print(w.lint(region="island_a"))         # 自检
-```
-
-**汇合方**：按坐标拼起来
-
-```python
-w = World()
-w.import_schem("out/island_a.schem", at=(0, 64, 0))
-w.import_schem("out/island_b.schem", at=(60, 64, 0))
-w.region_table()
-# island_a         parent=None       op=148
-# island_b         parent=None       op=148
-#   island_a/pav_1  parent=island_a  op=64
-#   island_b/pav_1  parent=island_b  op=64
-```
-
-**区域随文件走**：`export_schem` 把命名分区写进 `.schem` 的自定义字段，
-导入时自动重建（父子关系一起）。合并之后仍然能按区域操作 ——
-否则拿到手的只是一堆体素，搬不动、查不了、分不开。
-
-子区域重名时自动带上父名前缀（`island_b/pav_1`），不是干巴巴的 `pav_1@2`。
-
-**外部文件**（WorldEdit / Litematica / 网上下载的 `.schem`）没有区域信息，
-导入时用**文件名**建一个区域把整块圈进去；可用 `name=` / `prefix=` 覆盖：
-
-```python
-w.import_schem("castle_tower.schem", at=(10, 64, 10), prefix="src/")
-# → 区域 src/castle_tower，可以单独搬移 / 导出
-```
-
-**冲突检测**：`w.merge(other, on_conflict=...)`
-
-| 模式 | 冲突位置（两边都有方块且不同）怎么办 |
+| 参数 | 作用 |
 |---|---|
-| `"overwrite"`（默认） | 用对方的 |
-| `"skip"` | 保留自己的 |
-| `"report"` | **不写入**，只列出来，先看清楚再决定 |
+| `manifest_path="out/t.json"` | **把清单落盘**（强烈建议给，见下「读回分块」） |
+| `stale_out=[]` | 把"上一轮残留的瓦片"收集进这个列表（**只报告、不删除**） |
+
+> **残留瓦片不会自己消失。** 瓦片坐标是相对**本次**包围盒 `lo` 算的，
+> 而输出目录通常是复用的。上一轮留下的瓦片既不会被覆盖、也不会报错 ——
+> 它们只是静静地躺在那里，等你哪天把它们当成本次的瓦片读回去。
+> 这个参数让你知道该清目录了。库**不代删**：批量删文件在有沙箱/审计的环境里
+> 会被直接打断（实测 300+ 个文件触发保护策略，把整个导出进程掐了）。
+> **正确防线在下游**：`import_tiled` 只认清单里列出的文件，残留天然被忽略。
+
+### 读回分块 `import_tiled` —— 与 `export_tiled` 成对
 
 ```python
+from mcbuild import io
+
+parts = w.export_tiled("out/t", chunk=48, manifest_path="out/t.json")
+w2, st = io.import_tiled("out/t", manifest_path="out/t.json")
+print(st)          # {'tiles': 7, 'blocks': 63513, 'entities': 0, 'cells': 63513}
+```
+
+| 参数 | 说明 |
+|---|---|
+| `parts=` | `export_tiled` 的返回值（还没落盘时用这个） |
+| `manifest_path=` | 清单文件路径（`export_tiled(..., manifest_path=)` 写的那个） |
+| `world=` | 导入到已有世界，而不是新建 |
+| `on_block=fn` | **不建 World**，改为对每格调 `fn((x, y, z), 状态字符串)`；此时返回的 World 是 `None` |
+
+**`parts` 和 `manifest_path` 必须给一个，不给就抛 `ValueError`。**
+
+> ### 为什么禁止"从文件名推断位置"
+>
+> 文件名是 `prefix_ix_iy_iz.nbt`，看着像能直接算出坐标。**不能。**
+>
+> `export_tiled` 先把方块平移到**瓦片原点**，但 `export_nbt` 内部**又按
+> `sub.bounds().lo` 平移了一次**。所以文件里的 `pos` 是相对**该块内容的紧包围盒**的：
+>
+> ```
+> 世界坐标 = 瓦片原点 + 该块紧包围盒 lo + pos
+>                         ^^^^^^^^^^^^^^^^^^ 这一项在文件里根本不存在
+> ```
+>
+> `min(pos)` 恒为 0（导出时就减掉了），信息在那一刻就丢了。
+> 于是任何"文件名索引 × chunk + 世界包围盒 lo"的推断都会**每块都偏** ——
+> 而 zlib 能不能解、NBT 能不能解析、扇区表自不自洽**全都照样通过**。
+> 唯一的防线是把每块的实际世界范围写进清单。
+>
+> 这不是假设：实测两个瓦片里就有 **1 个**的推断位置与清单不符。
+> 真实项目里这个 bug 的表现是**"全图很多东西错位"**，只有肉眼才发现，
+> 而且会连带把"某个结构没建出来"这类问题掩盖成假象。
+
+`on_block=` 是给**大世界**用的：一张 1000×1000 的地图约 1000 万格，
+全建成 `World` 光 Python 对象就是 GB 级；按区域流式处理能把峰值压到"一个区域的量"，
+而坐标正确性仍然由库负责。
+
+### 导出存档：Anvil 世界（`mcbuild.anvil`）
+
+前三个出口（`.schem` / 结构方块 NBT / `.json`）**都还要手工落地** ——
+要进游戏得拿结构方块一块块贴。这个模块给的是**能直接扔进 `saves/` 打开的世界**。
+
+```python
+from mcbuild import World, box
+from mcbuild import anvil
+
+w = World()
+w.fill(box((0, 0, 0), (31, 7, 31)), "stone_bricks")
+
+r = anvil.write_save(w, "out/save", name="我的世界", seed=1234)
+print(r["regions"], r["blocks"], r["shift"], r["span"])
+
+# **不启动游戏**地反解回读校验：文件长度、扇区表、zlib、NBT、位打包、方块数守恒
+v = anvil.verify_save("out/save", expect_blocks=w.count())
+print(v["ok"], v["chunks"], v["blocks"])
+
+# 读存档里某一列（复核"某个特征到底建出来没有"）
+for y, name in anvil.probe_column("out/save", 16, 16, y0=0, y1=20):
+    print(y, name or "（空气）")
+```
+
+产物目录（1.21.x 的布局）：
+
+```
+<out>/level.dat                 世界元数据 + **全空气平坦生成器**（岛外是空天）
+<out>/region/r.<rx>.<rz>.mca    Anvil 区域文件（一个管 512×512）
+<out>/entities/  <out>/poi/     空目录
+```
+
+#### 三条格式事实（写错就"文件生成了但游戏打不开"，且不给报错）
+
+1. **`DATA_VERSION` 必须与目标游戏版本一致**（现为 `4440` = 1.21.8）。
+   写错会触发 DataFixer 升级路径，甚至静默改写方块。
+2. **子区块的调色板只剩 1 项时，`data` 必须整个省略。** 这条很值钱：
+   稀疏世界（占用率 3%）里大量子区块就只有一种方块或纯空气。
+3. **位打包不跨 long 边界**，低位先填：每个 long 装 `⌊64/bits⌋` 个条目，
+   剩余高位补零；方块 `bits = max(4, ⌈log2 c⌉)`，**生物群系没有 4 的下限**。
+   区块负载是**长度字段（含 1 字节压缩类型）+ 类型 + zlib 压缩的裸 NBT**，
+   只有 `level.dat` 用 gzip。
+
+#### 高度范围：用平移把不确定性消掉
+
+`minecraft:flat` 生成器的高度范围有两种说法（`−64..319` 或 `0..384`）。
+内容跨度小于 319 时，**同时满足两者的唯一窗口是 `[0, 319]`** ——
+所以 `write_save()` **自动把内容平移到最低点 = 0**，并在超过 `MAX_SPAN` 时直接报错。
+不用去赌哪个说法为真。
+
+#### 明确不做的事（以及为什么）
+
+- **不写光照与高度图**，让游戏自己重算（此时 `isLightOn` 缺失即 false，正是要的）。
+  官方两处文档对"空 section 要不要写"说法冲突，这里**默认省略**空子区块，
+  可用 `include_empty=True` 全写。
+- **`verify_save` 只证明"文件合法、格数守恒"，证明不了"某个洞被挖出来了"** ——
+  空气不占方块，丢了也数不出来。要验这个只能用 `probe_column` 读列（见上）。
+
+### 合并 `merge` —— 多 agent 协作的收口
+
+两个 agent 各自建完、要合到一起时，"**谁压了谁**"必须能查到，而不是静默覆盖：
+
+```python
+# 各自建岛 -> 各自导出（区域导出会平移到原点，见 §10.5）
+island_a.export_schem("out/island_a.schem")
+island_b.export_schem("out/island_b.schem")
+
+# 汇总时**必须显式给 at=**：区域文件是 0-based 的，不给 at 不会落回原世界坐标
+w = World()
+w.merge(World.from_schem("out/island_a.schem", at=(0, 64, 0)))
+part_b = World.from_schem("out/island_b.schem", at=(200, 140, 0))
+
 rep = w.merge(part_b, on_conflict="report")
+print(rep)
+# {'added': 1200, 'overwritten': 0, 'skipped': 0,
+#  'conflict_count': 5,
+#  'conflicts': [(V(3,64,7), stone_bricks, gold_block), ...],   # 最多 50 条
+#  'regions': ['island_b', 'island_b/pav'], 'entities': 2}
+
 if rep["conflict_count"]:
     for pos, mine, theirs in rep["conflicts"][:10]:
         print(pos, mine.short(), "->", theirs.short())
+    w.merge(part_b, on_conflict="overwrite")     # 确认后再落
 ```
 
-返回 `{added, overwritten, skipped, conflict_count, conflicts, regions, entities}`。
-"冲突"用**归一化比较** —— 一边写 `hinge` 一边缺省不算冲突。
+> **`at=` 不能省。** `World.export_schem` 记 `Offset`，所以整个世界的往返能回到原位；
+> 但 **`Region.export_schem` 是平移到原点导出的**（§10.5，为了能直接粘贴），
+> 读回来不给 `at=` 就会落到 `(0,0,0)` 附近 —— 表现是 `conflict_count` 恒为 0、
+> `added` 等于总格数，看着"没冲突"其实是两块根本不在同一个地方。
 
-> 两个 agent 同时写同一个 `World` 不是支持的用法（没有并发原语）。
-> 正确做法是各建各的、文件交换、由一方合并。
+| `on_conflict` | 冲突位置（两边都有方块且不同）怎么办 |
+|---|---|
+| `"overwrite"`（默认） | 用 `other` 的 |
+| `"skip"` | 保留自己的 |
+| `"report"` | **不写入**，只在报告里列出来，让你先看 |
+
+对方的**命名区域会一并带过来**（重名自动加 `@2`，不覆盖）。"冲突"判定用归一化比较 ——
+一边写 `hinge` 一边缺省不算冲突。
+
+> 这条正是把"空间租约"变成可执行断言的抓手：契约成立时 `conflict_count` 应当为 `0`。
 
 ---
 
@@ -1419,36 +1617,20 @@ define 需要的组件 → stage 建 → slice/section 检查 → compare 对称
 **大建筑（> 5 万方块）**
 
 ```
+如果涉及复杂场景、建筑群等，务必先进行详细世界设计
 ① 用 grid 定轴网，把建筑拆成命名阶段（台基 / 中殿 / 侧廊 / 塔楼 / 屋顶）
 ② 一轮只做一个阶段：load → stage → view 检查该阶段 → save
 ③ 每个阶段内部用组件复用重复单元（开间 / 柱列 / 扶壁）
 ④ 每完成一层做一次 compare.symmetry，别等全建完再查
 ⑤ 舞台检查用 render.view(center=w.stage_box("阶段名"))，不要渲染全世界
 ⑥ 最后 revision：改模板 replay / 局部 patch / unlink 转义
+建筑完成后，可选对内饰、外观进行再次细化装饰，避免外表美观内部空壳
 ```
-
-**建筑群 / 空岛群（多个独立单元）** ← 这种形态**必须分区**，否则后期搬不动
-
-```
-① 每个岛 / 每栋楼开一个 region；从属关系用嵌套表达
-   with w.region("island_a") as a:
-       build_island(w)
-       with w.region("pav_1") as p:     # 岛上的楼阁
-           build_pavilion(w)
-② w.region_table() 确认层级与大小（op 是各区域实际作用的格数）
-③ 位置不合适就按区域搬：a.translate(...) —— 不用重跑脚本
-④ 缺一个就复制一个：p.copy_to((0, 0, 40), name="pav_2")   # 连子区域一起复制
-⑤ 出了问题按区域收窄：w.lint(region="island_a")、d.by_region(w)、a.export_schem(...)
-⑥ 交付时可以每栋楼一个文件：for r in w.region_table(): w.region_of(r["name"]).export_schem(...)
-```
-
-> 建筑群的常见失误是**一开始不分，建完才想搬** —— 那时候只能整片挪，
-> 挪完还得手工修接缝。开第一个岛的时候就该开 region。
 
 **每轮反馈只看三样**：`w.report()` 的四段、`w.render.view(...)` 的局部、
 `w.compare` 的差异列表。**不要**输出整个世界。
 
-**视觉检查**（多模态环境）：`w.render` 全绿只说明几何成立，不说明好看。
+**最后一步做美术验收**（多模态环境）：`w.render` 全绿只说明几何成立，不说明好看。
 收尾时渲一张 `w.image.save("out/final.png")` 自己看，重点查三件事：
 
 1. **视线是否被压死**——远景或配属建筑有没有被主体的屋檐完全遮住（坐标上不冲突，
@@ -1458,3 +1640,8 @@ define 需要的组件 → stage 建 → slice/section 检查 → compare 对称
 3. **重色是否堆在一处**——屋面 / 木构 / 台基的明度层次有没有分开。
 
 发现问题就回去改脚本重渲，**不要**靠 ASCII 猜。
+
+---
+
+**多智能体协作建建筑群 / 大地图**（多个 agent 各建一片、最后合并）：
+空间租约、中间产物的坐标契约、可测量的派活标准、三层验收 —— 见 **`WORKFLOW.md`**。
